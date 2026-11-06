@@ -1,0 +1,16 @@
+name: astrbot_plugin_recognize_owner
+display_name: 认主人
+short_desc: 让 AI 认出谁是主人 —— 按真实 QQ 号标注发言者，并限制非主人的请求和次数
+desc: >-
+  AstrBot 分不清发言者的「QQ 昵称」和「QQ 号」—— 别人把昵称改成主人的名字，AI 就可能被骗。
+  这个插件在消息进入 LLM 之前，按发言者的真实 QQ 号做对比，把身份说明**贴在用户消息前面**：
+  主人说的话标注「这是主人」，其他人标注「这不是主人，真实 QQ 号是 xxxx」。
+  同时支持**非主人限制**：不许帮他写代码 / 改文档 / 做表格 / 干任何正经活；
+  以及**非主人次数限制**：每个号每天最多回几次、两次之间最小间隔，超限直接拦掉不调模型。
+  支持多个主人 QQ；所有开关和数字都能在 WebUI 的插件配置里改；插件出错时静默放行，绝不影响正常对话。
+version: 1.2.0
+author: 风理
+repo: ""
+astrbot_version: ">=4.16"
+support_platforms:
+  - aiocqhttp
