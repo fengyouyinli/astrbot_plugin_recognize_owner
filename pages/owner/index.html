@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>认主人 · 设置</title>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e6e9ef; --dim:#8b93a3;
+    --accent:#4f7cff; --ok:#3ecf8e; --warn:#ffb454; --bad:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;padding:24px}
+  .wrap{max-width:860px;margin:0 auto}
+  h1{font-size:22px;margin:0 0 6px}
+  .sub{color:var(--dim);font-size:13.5px;margin-bottom:22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 4px;font-weight:600}
+  .card .hint{color:var(--dim);font-size:12.5px;margin-bottom:14px}
+  .row{display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap}
+  input{background:#0b0d12;border:1px solid var(--line);border-radius:8px;color:var(--fg);
+    padding:8px 10px;font:inherit;font-size:13.5px;outline:none}
+  input:focus{border-color:var(--accent)}
+  .bot{width:150px;flex:none;font-variant-numeric:tabular-nums}
+  .owners{flex:1;min-width:220px}
+  button{background:#222838;border:1px solid var(--line);color:var(--fg);border-radius:8px;
+    padding:7px 12px;font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}
+  button:hover{border-color:#3a4256}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.danger{color:var(--bad);border-color:#3a2530}
+  button.danger:hover{background:#2a1a20}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .empty{color:var(--dim);font-size:13px;padding:10px 0}
+  .status{font-size:13px;margin-top:10px;min-height:20px}
+  .status.ok{color:var(--ok)} .status.bad{color:var(--bad)}
+  .note{color:var(--dim);font-size:12.5px;margin-top:8px}
+  .tag{display:inline-block;background:#1d2330;border:1px solid var(--line);border-radius:6px;
+    padding:1px 7px;font-size:12px;color:var(--dim);margin-left:6px}
+  .toolbar{display:flex;gap:10px;align-items:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>认主人 · 设置</h1>
+  <div class="sub">按机器人分别设置主人 QQ 号。每个机器人只认自己那一行的主人；没列出来的机器人用「全局兜底」。</div>
+
+  <div class="card">
+    <h2>全局兜底</h2>
+    <div class="hint">某个机器人没在下面的表里单独配时，用它。留空 = 那个机器人不认任何主人。</div>
+    <div class="row">
+      <input id="globalOwners" class="owners" placeholder="主人 QQ，多个用逗号分隔，例如 123456789,987654321" />
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>按机器人设置 <span class="tag" id="countTag">0 个</span></h2>
+    <div class="hint">左边填<b>机器人自己的 QQ 号</b>，右边填这个机器人认的<b>主人 QQ</b>（多个用逗号）。</div>
+    <div id="rows"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="addBtn">+ 添加一个机器人</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar">
+      <button id="saveBtn" class="primary">保存</button>
+      <button id="reloadBtn">重新读取</button>
+      <span class="status" id="status"></span>
+    </div>
+    <div class="note">保存后立即生效（不用重启 AstrBot）。配置文件里会变成每行一条 <code>机器人QQ: 主人QQ</code>。</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  // AstrBot 的 WebUI 用 JWT（Authorization: Bearer），普通 fetch 带不上 token。
+  // ⚠️ SDK **不需要自己用 <script src> 引**（那样会 401，因为浏览器加载 script 时不带 token）；
+  //    WebUI 打开插件页面时会**自动把 window.AstrBotPluginPage 注入到 iframe 里**。
+  //    apiGet/apiPost 通过 postMessage 让父窗口带着 token 去调接口。
+  //    endpoint 用**插件内部的短路径**（比如 "config"），父窗口会拼成 /api/plugin/<插件>/config。
+  var ROUTE = 'config';
+
+  function bridge() { return window.AstrBotPluginPage || null; }
+
+  function apiGet() {
+    var b = bridge();
+    if (b && typeof b.apiGet === 'function') {
+      return b.ready().then(function () { return b.apiGet(ROUTE); });
+    }
+    // 兜底：不在 iframe 里时直连（会 401，至少能看出是环境问题而不是代码问题）
+    return fetch('/api/plugin/astrbot_plugin_recognize_owner/' + ROUTE, { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); });
+  }
+
+  function apiPost(body) {
+    var b = bridge();
+    if (b && typeof b.apiPost === 'function') {
+      return b.ready().then(function () { return b.apiPost(ROUTE, body); });
+    }
+    return fetch('/api/plugin/astrbot_plugin_recognize_owner/' + ROUTE, {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json(); });
+  }
+
+  var state = { owner_qq: '', rows: [] };
+
+  function $(id) { return document.getElementById(id); }
+  function setStatus(text, kind) {
+    var el = $('status');
+    el.textContent = text || '';
+    el.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function parseMap(raw) {
+    var out = [];
+    String(raw || '').split(/\r?\n/).forEach(function (line) {
+      line = line.trim();
+      if (!line || line.charAt(0) === '#') return;
+      var sep = line.indexOf(':') >= 0 ? ':' : (line.indexOf('：') >= 0 ? '：' : '');
+      if (!sep) return;
+      var i = line.indexOf(sep);
+      var bot = line.slice(0, i).trim();
+      var owners = line.slice(i + 1).replace(/[，\s]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '');
+      if (bot) out.push({ bot: bot, owners: owners });
+    });
+    return out;
+  }
+
+  function buildMap() {
+    return state.rows.filter(function (r) { return r.bot.trim(); })
+      .map(function (r) { return r.bot.trim() + ': ' + r.owners.trim(); })
+      .join('\n');
+  }
+
+  function render() {
+    var box = $('rows');
+    box.innerHTML = '';
+    if (!state.rows.length) {
+      box.innerHTML = '<div class="empty">还没有单独配置的机器人。点下面的按钮加一个。</div>';
+    }
+    state.rows.forEach(function (r, idx) {
+      var row = document.createElement('div');
+      row.className = 'row';
+      var bot = document.createElement('input');
+      bot.className = 'bot'; bot.placeholder = '机器人 QQ'; bot.value = r.bot;
+      bot.oninput = function () { state.rows[idx].bot = bot.value; };
+      var owners = document.createElement('input');
+      owners.className = 'owners'; owners.placeholder = '主人 QQ（逗号分隔）'; owners.value = r.owners;
+      owners.oninput = function () { state.rows[idx].owners = owners.value; };
+      var del = document.createElement('button');
+      del.className = 'danger'; del.textContent = '删除';
+      del.onclick = function () { state.rows.splice(idx, 1); render(); };
+      row.appendChild(bot); row.appendChild(owners); row.appendChild(del);
+      box.appendChild(row);
+    });
+    $('countTag').textContent = state.rows.length + ' 个';
+  }
+
+  function load() {
+    setStatus('读取中…');
+    apiGet()
+      .then(function (d) {
+        if (!d || d.ok !== true) throw new Error((d && d.error) || '返回异常');
+        state.owner_qq = d.config && d.config.owner_qq || '';
+        state.rows = parseMap(d.config && d.config.owner_map || '');
+        $('globalOwners').value = state.owner_qq;
+        render();
+        setStatus('已读取', 'ok');
+      })
+      .catch(function (e) {
+        setStatus('读取失败：' + (e && e.message || e), 'bad');
+      });
+  }
+
+  function save() {
+    var body = {
+      owner_qq: $('globalOwners').value.trim(),
+      owner_map: buildMap()
+    };
+    $('saveBtn').disabled = true;
+    setStatus('保存中…');
+    apiPost(body)
+      .then(function (d) {
+        $('saveBtn').disabled = false;
+        if (!d || d.ok !== true) throw new Error((d && d.error) || '保存失败');
+        state.owner_qq = body.owner_qq;
+        state.rows = parseMap(body.owner_map);
+        render();
+        setStatus('已保存 ✓', 'ok');
+      })
+      .catch(function (e) {
+        $('saveBtn').disabled = false;
+        setStatus('保存失败：' + (e && e.message || e), 'bad');
+      });
+  }
+
+  $('addBtn').onclick = function () { state.rows.push({ bot: '', owners: '' }); render(); };
+  $('saveBtn').onclick = save;
+  $('reloadBtn').onclick = load;
+  load();
+})();
+</script>
+</body>
+</html>

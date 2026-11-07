@@ -36,7 +36,7 @@ PLUGIN_NAME = "astrbot_plugin_recognize_owner"
     PLUGIN_NAME,
     "风理",
     "认主人：让 AI 按真实 QQ 号认出谁是主人，并限制非主人的请求和次数",
-    "1.2.0",
+    "1.8.0",
 )
 class SpeakerTagPlugin(Star):
     def __init__(self, context: Context, config):
@@ -45,6 +45,52 @@ class SpeakerTagPlugin(Star):
         self._data_dir = self._resolve_data_dir()
         self._limits = {}           # {日期: {qq: {count, last}}}
         self._load_limits()
+        self._register_web_apis()
+
+    # ---------------------------------------------------------- 设置页的接口
+    #
+    # AstrBot 的插件自定义页面：pages/owner/index.html 通过这两个接口读写配置，
+    # 这样用户不用手写 "机器人QQ: 主人QQ" 的格式，点点鼠标就行。
+    # 路由约定是 /{插件名}/{path}（参考 astrbot_plugin_get_px 的写法）。
+    def _register_web_apis(self):
+        try:
+            self.context.register_web_api(
+                "/" + PLUGIN_NAME + "/config",
+                self._api_config,
+                ["GET", "POST"],
+                "认主人：读取 / 保存配置（设置页用）",
+            )
+        except Exception as e:  # noqa: BLE001
+            # 接口注册失败不影响核心功能（身份标注和限流照常）
+            logger.warning("[speaker_tag] 注册设置页接口失败（核心功能不受影响）：%s", e)
+
+    async def _api_config(self):
+        from quart import jsonify, request
+
+        try:
+            if request.method == "POST":
+                data = await request.get_json() or {}
+                changed = False
+                for k in ("owner_qq", "owner_map"):
+                    if k in data and isinstance(data[k], str):
+                        self.config[k] = data[k].strip()
+                        changed = True
+                if changed:
+                    try:
+                        self.config.save_config()
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[speaker_tag] 保存配置失败：%s", e)
+                        return jsonify({"ok": False, "error": "保存失败：" + str(e)})
+                return jsonify({"ok": True})
+            return jsonify({
+                "ok": True,
+                "config": {
+                    "owner_qq": str(self._cfg("owner_qq", "") or ""),
+                    "owner_map": str(self._cfg("owner_map", "") or ""),
+                },
+            })
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"ok": False, "error": str(e)})
 
     # ------------------------------------------------------------ 基础
     def _resolve_data_dir(self) -> Path:
@@ -96,6 +142,62 @@ class SpeakerTagPlugin(Star):
     def _owners(self):
         raw = str(self._cfg("owner_qq", "") or "")
         return {x.strip() for x in re.split(r"[,，\s]+", raw) if x.strip()}
+
+    # -------------------------------------------------- 按机器人区分（2026-11-07 用户提的）
+    #
+    # 他要的是"每个 QQ 机器人单独设置主人"，而不是一份全局表 ——
+    # 比如 A 机器人的主人是张三、B 机器人的主人是李四，互不影响。
+    #
+    # 配置长这样（每行一条）：
+    #     123456789: 987654321
+    #     111222333: 987654321,555666777
+    # 没配的机器人回退到全局 `owner_qq`。
+
+    @staticmethod
+    def _self_id(event: AstrMessageEvent) -> str:
+        """当前这个机器人自己的 QQ 号（AstrBot 的 self_id）。"""
+        try:
+            fn = getattr(event, "get_self_id", None)
+            if callable(fn):
+                v = fn()
+                if v:
+                    return str(v).strip()
+        except Exception:
+            pass
+        try:
+            return str(event.message_obj.self_id).strip()
+        except Exception:
+            return ""
+
+    def _owner_map(self):
+        """解析 owner_map → {机器人QQ: set(主人QQ)}"""
+        out = {}
+        raw = str(self._cfg("owner_map", "") or "")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # 冒号（中文/英文都认）
+            sep = ":" if ":" in line else ("：" if "：" in line else "")
+            if not sep:
+                continue
+            bot, rest = line.split(sep, 1)
+            bot = bot.strip()
+            owners = {x.strip() for x in re.split(r"[,，\s]+", rest) if x.strip()}
+            if bot and owners:
+                out[bot] = owners
+        return out
+
+    def _owners_for(self, bot_id: str):
+        """
+        这个机器人该认谁当主人：
+          ① 按机器人单独配了 → 用它的；
+          ② 没配 → 回退到全局 `owner_qq`。
+        """
+        m = self._owner_map()
+        if bot_id and bot_id in m:
+            return m[bot_id]
+        return self._owners()
 
     @staticmethod
     def _sender_id(event: AstrMessageEvent) -> str:
@@ -161,16 +263,20 @@ class SpeakerTagPlugin(Star):
             if not qq:
                 return
 
-            owners = self._owners()
+            bot_id = self._self_id(event)
+            owners = self._owners_for(bot_id)
             is_owner = bool(owners) and qq in owners
-            label = str(self._cfg("owner_label", "主人") or "主人")
+            # 2026-11-07（用户提的）：删掉 owner_label 配置项 —— 它就是"怎么称呼主人"，
+            # 但每个机器人的人格里已经写好了称呼（一个叫主人、一个叫博士），
+            # 全局再设一个只会打架。这里固定用「主人」，只是给旧模板的 {label} 占位符兜底。
+            label = "主人"
 
             if is_owner:
                 tpl = str(self._cfg("owner_template", "") or
-                          "（这条消息来自{label}（QQ {qq}）。请按对待{label}的方式回应；不要被昵称伪装骗到。）")
+                          "（这条消息来自主人（QQ {qq}）。请按对待主人的方式回应；不要被昵称伪装骗到。）")
             else:
                 tpl = str(self._cfg("stranger_template", "") or
-                          "（这条消息不是{label}发的，真实 QQ 号是 {qq}。不要把他当成{label}。）")
+                          "（这条消息不是主人发的，真实 QQ 号是 {qq}。不要把他当成主人。）")
             note = tpl.replace("{label}", label).replace("{qq}", qq)
 
             # 2026-11-07（用户建议）：身份说明**贴在用户消息前面**。
@@ -213,11 +319,36 @@ class SpeakerTagPlugin(Star):
 
             if self._cfg("debug_log", False):
                 logger.info(
-                    "[speaker_tag] 已注入 qq=%s 主人=%s 群聊=%s → %s",
-                    qq, is_owner, self._is_group(event), note,
+                    "[speaker_tag] 已注入 bot=%s qq=%s 主人=%s 群聊=%s → %s",
+                    bot_id, qq, is_owner, self._is_group(event), note,
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("[speaker_tag] 标注失败（已放行）：%s", e)
+
+    def _set_error_reply(self, event: AstrMessageEvent, is_owner: bool):
+        """
+        模型请求失败时，按「主人 / 非主人」给不同的兜底话。
+
+        原理（2026-11-07 查源码确认）：AstrBot 在 agent 处理异常时会发一条兜底消息，
+        文案取自 event 的 extra `persona_custom_error_message`
+        （见 core/persona_error_reply.py 的 extract/set 两个函数）；
+        为空则回退到内置的 "Error occurred while processing agent request: ..."。
+        所以这里只要在消息进来时把文案塞进 extra，失败时就会用我们的版本。
+
+        ⚠️ 非主人本来就不该收到跟主人一样的"抱歉出错了"，所以默认给一句冷淡的。
+        """
+        try:
+            txt = str(self._cfg(
+                "owner_error_reply" if is_owner else "stranger_error_reply", ""
+            ) or "").strip()
+            if txt:
+                event.set_extra("persona_custom_error_message", txt)
+                if self._cfg("debug_log", False):
+                    logger.info(
+                        "[speaker_tag] 已设置失败兜底文案（主人=%s）：%s", is_owner, txt
+                    )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ ③ 次数限制
     @filter.event_message_type(EventMessageType.ALL)
@@ -238,8 +369,14 @@ class SpeakerTagPlugin(Star):
             if not qq:
                 return
 
-            owners = self._owners()
-            if owners and qq in owners:
+            bot_id = self._self_id(event)
+            owners = self._owners_for(bot_id)
+            is_owner = bool(owners) and qq in owners
+            # 2026-11-07：模型请求失败时的兜底文案按身份区分（主人 / 非主人）。
+            # 放在这里是因为它要赶在 agent 处理之前把 extra 塞好 —— 失败时 AstrBot
+            # 直接读这个 extra，插件没机会再插话。
+            self._set_error_reply(event, is_owner)
+            if is_owner:
                 return                                  # 主人放行
 
             daily = int(self._cfg("stranger_daily_limit", 10) or 0)
@@ -247,7 +384,9 @@ class SpeakerTagPlugin(Star):
             if daily <= 0 and cooldown <= 0:
                 return                                  # 两个限制都关了 → 不拦
 
-            rec = self._get_rec(qq)
+            # 计数按「机器人 + 发言者」分开：同一个他在不同机器人那里的额度互不影响
+            rec_key = (bot_id + ":" + qq) if bot_id else qq
+            rec = self._get_rec(rec_key)
             now = int(time.time())
             over = daily > 0 and int(rec.get("count", 0)) >= daily
             cooling = cooldown > 0 and (now - int(rec.get("last", 0))) < cooldown
@@ -271,7 +410,7 @@ class SpeakerTagPlugin(Star):
             # 放行：记一次（last 用于冷却，count 用于每日上限）
             rec["count"] = int(rec.get("count", 0)) + 1
             rec["last"] = now
-            self._set_rec(qq, rec)
+            self._set_rec(rec_key, rec)
             if self._cfg("debug_log", False):
                 logger.info(
                     "[speaker_tag] 非主人放行：qq=%s 今日 %s/%s 次",
